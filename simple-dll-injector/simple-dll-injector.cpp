@@ -1,65 +1,96 @@
-#include <iostream>
 #include <Windows.h>
+#include <iostream>
+#include <TlHelp32.h>
 
-// Function to inject DLL into the target process
-bool InjectDLL(DWORD processId, const char* dllPath) {
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, processId);
-    if (hProcess == NULL) {
-        std::cout << "Failed to open the target process." << std::endl;
-        return false;
+HANDLE FindProc(const char procName[260]) {
+    printf("Creating snapshot of all running processes...\n");
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+
+    if (!hSnap) {
+        printf("Error creating snapshot: %lu\n", GetLastError());
+        return nullptr;
     }
 
-    LPVOID addr = (LPVOID)GetProcAddress(GetModuleHandle(L"kernel32.dll"), "LoadLibraryA");
-    if (addr == NULL) {
-        std::cout << "Failed to get the address of LoadLibraryA function." << std::endl;
-        CloseHandle(hProcess);
-        return false;
+    PROCESSENTRY32 peEntry;
+    peEntry.dwSize = sizeof(PROCESSENTRY32);
+
+    if (!Process32First(hSnap, &peEntry)) {
+        printf("Error retrieving process info: %lu\n", GetLastError());
+        CloseHandle(hSnap);
+        return nullptr;
     }
 
-    LPVOID arg = (LPVOID)VirtualAllocEx(hProcess, NULL, strlen(dllPath), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    if (arg == NULL) {
-        std::cout << "Failed to allocate memory in the target process." << std::endl;
-        CloseHandle(hProcess);
-        return false;
-    }
+    do {
+        if (!_stricmp(peEntry.szExeFile, procName)) {
+            printf("Match found with PID: %u\n", peEntry.th32ProcessID);
+            CloseHandle(hSnap);
+            HANDLE proc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, peEntry.th32ProcessID);
+            if (!proc) {
+                printf("Error opening process with PID: %u, error code: %lu\n", peEntry.th32ProcessID, GetLastError());
+                return nullptr;
+            }
+            return proc;
+        }
+    } while (Process32Next(hSnap, &peEntry));
 
-    if (!WriteProcessMemory(hProcess, arg, dllPath, strlen(dllPath), NULL)) {
-        std::cout << "Failed to write DLL path into the target process." << std::endl;
-        VirtualFreeEx(hProcess, arg, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        return false;
-    }
-
-    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)addr, arg, 0, NULL);
-    if (hThread == NULL) {
-        std::cout << "Failed to create a remote thread in the target process." << std::endl;
-        VirtualFreeEx(hProcess, arg, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        return false;
-    }
-
-    WaitForSingleObject(hThread, INFINITE);
-    CloseHandle(hThread);
-    VirtualFreeEx(hProcess, arg, 0, MEM_RELEASE);
-    CloseHandle(hProcess);
-    return true;
+    printf("No matching process found.\n");
+    CloseHandle(hSnap);
+    return nullptr;
 }
 
 int main(int argc, char* argv[]) {
     if (argc != 3) {
-        std::cout << "Usage: " << argv[0] << " <process_id> <dll_path>" << std::endl;
+        printf("Usage: %s <path_to_dll> <process_name>\n", argv[0]);
         return 1;
     }
 
-    DWORD processId = std::stoi(argv[1]);
-    const char* dllPath = argv[2];
+    const char* partialPath = argv[1];
+    const char* procName = argv[2];
 
-    if (InjectDLL(processId, dllPath)) {
-        std::cout << "DLL injection successful!" << std::endl;
-    }
-    else {
-        std::cout << "DLL injection failed." << std::endl;
+    char dllPath[MAX_PATH];
+    GetFullPathName(partialPath, MAX_PATH, dllPath, NULL);
+
+    if (GetFileAttributes(dllPath) == INVALID_FILE_ATTRIBUTES) {
+        printf("DLL file does not exist: %s, error code: %lu\n", dllPath, GetLastError());
+        return 1;
     }
 
+    printf("Full DLL Path: %s\n", dllPath);
+    printf("Process name: %s\n", procName);
+
+    printf("Searching for the process...\n");
+    HANDLE hProc = FindProc(procName);
+
+    if (!hProc || hProc == INVALID_HANDLE_VALUE) {
+        printf("Error finding process, error code: %lu\n", GetLastError());
+        return 1;
+    }
+
+    printf("Allocating memory in the target process...\n");
+    LPVOID loc = VirtualAllocEx(hProc, NULL, MAX_PATH, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+    if (!loc) {
+        printf("Error in memory allocation, error code: %lu\n", GetLastError());
+        return 1;
+    }
+
+    printf("Writing DLL path into the target process memory...\n");
+    if (!WriteProcessMemory(hProc, loc, dllPath, strlen(dllPath) + 1, NULL)) {
+        printf("Error in WriteProcessMemory, error code: %lu\n", GetLastError());
+        VirtualFreeEx(hProc, loc, strlen(dllPath) + 1, MEM_FREE);
+        return 1;
+    }
+
+    printf("Creating remote thread to load the DLL...\n");
+    HANDLE hThread = CreateRemoteThread(hProc, NULL, 0, (LPTHREAD_START_ROUTINE)LoadLibraryA, loc, 0, NULL);
+
+    if (!hThread) {
+        printf("Error in CreateRemoteThread, error code: %lu\n", GetLastError()); 
+        return 1;
+    }
+    Beep(1000, 500);
+    printf("DLL successfully injected!\n");
+    CloseHandle(hProc);
+    CloseHandle(hThread);
     return 0;
 }
