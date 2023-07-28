@@ -10,12 +10,12 @@ Funciona localizando o processo alvo, alocando memória dentro desse processo pa
 
 Para usar o injetor de DLL, execute o seguinte comando na linha de comando:
 
-```
+```powershell
 simple-dll-injector.exe <path_to_dll> <process_name>
 ```
 
 Exemplo:
 
-```
+```powershell
 simple-dll-injector.exe myDll.dll targetProcess.exe
 ```
